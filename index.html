@@ -1,0 +1,245 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Item Capture</title>
+
+<style>
+body{
+  margin:0;
+  background:#ffffff;
+  font-family:Arial,sans-serif;
+  padding:40px 20px;
+}
+
+.wrap{
+  max-width:500px;
+  margin:auto;
+}
+
+button{
+  width:100%;
+  border:none;
+  border-radius:16px;
+  padding:26px;
+  margin:16px 0;
+  font-size:22px;
+  font-weight:700;
+  color:#fff;
+  cursor:pointer;
+  background:linear-gradient(135deg,#2196F3 0%,#1976D2 100%);
+  box-shadow:0 8px 20px rgba(0,0,0,0.15);
+}
+
+button:disabled{
+  opacity:.5;
+  cursor:not-allowed;
+}
+
+.hidden{
+  display:none;
+}
+
+#audioPreview{
+  width:100%;
+  margin-top:10px;
+}
+
+#status{
+  text-align:center;
+  margin-top:10px;
+  font-weight:600;
+}
+</style>
+</head>
+
+<body>
+
+<div class="wrap">
+
+<input id="photoInput" type="file" accept="image/*" capture="environment" class="hidden">
+
+<button id="photoBtn">Take Photo</button>
+
+<button id="recordBtn">Hold to Record</button>
+
+<audio id="audioPreview" controls class="hidden"></audio>
+
+<button id="submitBtn" disabled>Submit</button>
+
+<div id="status"></div>
+
+</div>
+
+<script>
+
+const WEBAPP_URL="https://script.google.com/macros/s/AKfycbz-VMFotIWEQFgx3goZ2e9PnGOEfeet5WYnS8XvcWQeivqIFlWZGYIGGklmkaZRiCWD/exec";
+
+let selectedPhotoFile=null;
+let mediaRecorder=null;
+let audioStream=null;
+let audioChunks=[];
+let recordedAudioBlob=null;
+let isHolding=false;
+let isSubmitting=false;
+let audioPreviewUrl=null;
+
+const photoInput=document.getElementById("photoInput");
+const photoBtn=document.getElementById("photoBtn");
+const recordBtn=document.getElementById("recordBtn");
+const submitBtn=document.getElementById("submitBtn");
+const statusEl=document.getElementById("status");
+const audioPreview=document.getElementById("audioPreview");
+
+function setStatus(t){statusEl.textContent=t||"";}
+
+function updateSubmit(){
+submitBtn.disabled=isSubmitting||!selectedPhotoFile||!recordedAudioBlob;
+}
+
+function resetAudio(){
+if(audioPreviewUrl)URL.revokeObjectURL(audioPreviewUrl);
+audioPreviewUrl=null;
+audioPreview.src="";
+audioPreview.classList.add("hidden");
+}
+
+function showAudio(blob){
+resetAudio();
+audioPreviewUrl=URL.createObjectURL(blob);
+audioPreview.src=audioPreviewUrl;
+audioPreview.classList.remove("hidden");
+}
+
+function toBase64(file){
+return new Promise((resolve,reject)=>{
+const reader=new FileReader();
+reader.onload=()=>resolve(String(reader.result).split(",")[1]||"");
+reader.onerror=reject;
+reader.readAsDataURL(file);
+});
+}
+
+function getMime(){
+const types=["audio/webm;codecs=opus","audio/webm","audio/mp4"];
+for(const t of types){
+try{
+if(MediaRecorder.isTypeSupported(t))return t;
+}catch(e){}
+}
+return "";
+}
+
+async function startRecording(){
+audioStream=await navigator.mediaDevices.getUserMedia({audio:true});
+audioChunks=[];
+recordedAudioBlob=null;
+
+const mime=getMime();
+mediaRecorder=mime?new MediaRecorder(audioStream,{mimeType:mime}):new MediaRecorder(audioStream);
+
+mediaRecorder.ondataavailable=e=>{
+if(e.data.size>0)audioChunks.push(e.data);
+};
+
+mediaRecorder.onstop=()=>{
+const type=mediaRecorder.mimeType||"audio/webm";
+recordedAudioBlob=new Blob(audioChunks,{type});
+showAudio(recordedAudioBlob);
+recordBtn.textContent="Recorded";
+audioStream.getTracks().forEach(t=>t.stop());
+updateSubmit();
+};
+
+mediaRecorder.start();
+}
+
+function stopRecording(){
+if(mediaRecorder&&mediaRecorder.state==="recording")mediaRecorder.stop();
+}
+
+photoBtn.onclick=()=>photoInput.click();
+
+photoInput.onchange=e=>{
+selectedPhotoFile=e.target.files[0];
+if(selectedPhotoFile)photoBtn.textContent="Photo Selected";
+updateSubmit();
+};
+
+recordBtn.onpointerdown=async()=>{
+if(isHolding||isSubmitting)return;
+isHolding=true;
+recordBtn.textContent="Recording...";
+await startRecording();
+};
+
+function endHold(){
+if(!isHolding)return;
+isHolding=false;
+stopRecording();
+}
+
+recordBtn.onpointerup=endHold;
+recordBtn.onpointercancel=endHold;
+
+submitBtn.onclick=async()=>{
+
+if(isSubmitting)return;
+isSubmitting=true;
+updateSubmit();
+setStatus("Submitting...");
+
+try{
+
+const photoB64=await toBase64(selectedPhotoFile);
+const audioB64=await toBase64(recordedAudioBlob);
+
+const payload={
+photo:{
+filename:selectedPhotoFile.name,
+mimeType:selectedPhotoFile.type,
+base64Data:photoB64
+},
+audio:{
+filename:"audio_"+Date.now()+".webm",
+mimeType:recordedAudioBlob.type,
+base64Data:audioB64
+}
+};
+
+const res=await fetch(WEBAPP_URL,{
+method:"POST",
+headers:{"Content-Type":"text/plain"},
+body:JSON.stringify(payload)
+});
+
+const txt=await res.text();
+const result=JSON.parse(txt);
+
+if(!result.ok)throw new Error(result.error||"Submit failed");
+
+setStatus("Submitted");
+
+photoInput.value="";
+selectedPhotoFile=null;
+recordedAudioBlob=null;
+audioChunks=[];
+recordBtn.textContent="Hold to Record";
+photoBtn.textContent="Take Photo";
+resetAudio();
+
+}catch(err){
+setStatus("Error: "+err.message);
+}
+
+isSubmitting=false;
+updateSubmit();
+};
+
+updateSubmit();
+
+</script>
+
+</body>
+</html>
